@@ -1,0 +1,179 @@
+---
+title: "Network interference estimators"
+author: "Vanessa McNealis"
+date: "2024-01-18"
+output: pdf_document
+---
+
+Load dependencies and source script
+
+```{r dependencies, message = FALSE, warning = FALSE}
+library(boot)
+library(tidyverse)
+library(igraph)
+library(data.table)
+library(pbapply)
+library(lme4)
+library(statnet)
+library(intergraph)
+library(statmod)
+library(fastGHQuad)
+library(geex)
+library(here)
+source(url("https://github.com/vanessamcnealis/Network-Interference-estimators/blob/main/Estimating_functions.R?raw=TRUE"))
+```
+
+## Data preparation
+
+The data at hand \texttt{dat} consists of one simulated dataset used for the simulation
+studies presented in the paper. The data generating scheme for the assigned treatment 
+$Z$, the outcome $Y$, and the covariates $X_1$, $X_2$ and $X_3$ is described in the
+manuscript. 
+
+```{r prep}
+dat  <- read.csv("https://github.com/vanessamcnealis/Network-Interference-estimators/blob/main/dat.csv?raw=TRUE")
+load(url("https://github.com/vanessamcnealis/Network-Interference-estimators/blob/main/network.RData?raw=TRUE"))
+```
+
+### Network visualization
+
+```{r plot}
+plot(network, vertex.size=1, vertex.label=NA, vertex.color="cadetblue3", 
+     vertex.frame.color="cadetblue3")
+```
+
+### Prepare the data for modeling
+
+```{r covariates}
+# Total number of nodes
+N <- nrow(dat)
+
+#Number of components
+m <- length(unique(dat$component.id))
+
+# Adjacency matrix associated with the graph
+A <- get.adjacency(network)
+
+# Create a variable indicating the degree of a node
+dat$degree <- as.numeric(A %*% rep(1, N))
+
+# Create a variable indicating the number of treated neighbours for each node
+dat$k_treated <- 
+    as.numeric(A %*% matrix(dat$Z, ncol = 1, nrow = nrow(dat)))
+
+# Create a variable indicated the proportion of treated neighbours for each node
+dat$prop_treated <- ifelse(dat$degree == 0, 0, dat$k_treated/dat$degree)
+
+# Change this vector for different alpha values
+alpha <- c(0.2, 0.5, 0.8)
+
+```
+
+## Modeling
+
+In this section, we will apply the IPW, REG, DR-BC, and DR-WLS estimators for the 
+average potential outcomes and associated causal contrasts. The average potential 
+outcome for a unit depends on an individual exposure/treatment $z$ and 
+treatment coverage $\alpha \in (0,1)$, where the treatment coverage represents the 
+counterfactual probability that first-order neighbours receive the 
+exposure/treatment. For each estimation method, the R programs will output the 
+\textbf{point estimate and the estimated variance for average potential
+outcomes $\mu_{0\alpha}, \mu_{1\alpha}, \mu_{\alpha}$} under three different treatment coverages (i.e., $\alpha \in \{0.2, 0.5, 0.8\}$), 
+respectively. Also, the R program will output the point estimation and estimated 
+variance of four causal effects: Direct (DE), Indirect (IE), Total (TE), and 
+Overall effect (OE).
+
+Equations for calculating the four causal effect estimates are:
+\begin{itemize}
+\item $\hat{DE}(\alpha) =  \hat{\mu}_{1\alpha} - \hat{\mu}_{0\alpha}$
+\item $\hat{IE}(\alpha_0, \alpha_1) =  \hat{\mu}_{0\alpha_1} - \hat{\mu}_{0\alpha_0}$
+\item $\hat{TE}(\alpha_0, \alpha_1) =  \hat{\mu}_{1\alpha_1} - \hat{\mu}_{0\alpha_0}$
+\item $\hat{OE}(\alpha_0, \alpha_1) =  \hat{\mu}_{1\alpha_1} - \hat{\mu}_{0\alpha_0},$
+\end{itemize}
+where $\alpha_0$ and $\alpha_1$ represent distinct treatment coverages with 
+$\alpha_0 \neq \alpha_1$. If the vector supplied is $\alpha = (0.2, 0.5, 0.8)$,
+the program will treat values in sequential order and compare
+\begin{itemize}
+\item $\alpha_1 = 0.5$ vs. $\alpha_0 = 0.2$
+\item $\alpha_1 = 0.8$ vs. $\alpha_0 = 0.2$
+\item $\alpha_1 = 0.8$ vs. $\alpha_0 = 0.5$.
+\end{itemize}
+
+We first specify the models for the outcome and treatment propensity (note that
+these correspond to the oracle models). In the model for the treatment propensity,
+we include a random effect term for the component/subgraph. Note that for DR-WLS, the outcome formula
+supplied should not include terms for the treatment assignment as this method
+stratifies the sample based on the treatment indicator. 
+
+```{r formulas}
+
+propensity_formula <- Z ~ abs(X1) + I(X2*abs(X1)) +X3+ (1|component.id)
+outcome_formula <- Y ~ Z + prop_treated + prop_treated*Z + abs(X1) + X2 + 
+  abs(X1)*X2
+outcome_formula_drwls <- Y ~ prop_treated + abs(X1) + X2 + abs(X1)*X2
+
+```
+
+
+### Inverse probability-of-treatment weighting (IPW) estimates
+
+```{r ipw}
+
+ipw_estimates <- ipw_estimation(data=dat, 
+                                propensity_formula = propensity_formula, 
+                                alpha = alpha)
+ipw_estimates
+
+```
+
+In the output above,
+\begin{itemize}
+\item \textbf{Section [[1]]} displays the point estimates, estimated variances, and 95\% Wald-type confidence intervals for the average potential outcomes under three different treatment coverages (i.e., $\alpha = 0.2, 0.5, 0.8$) and each individual exposure (i.e. $z=0,1$ , and marginal). The marginal average potential outcome is the average potential outcomes for a particular treatment coverage, regardless of individual exposure status.
+\item \textbf{Section [[2]]} displays the point estimates (estimand = “Direct effect”, “Indirect effect”, “Total effect”, “Overall effect” in the output), estimated variances, and 95\% Wald-type confidence intervals for four causal contrasts: direct, indirect, total and overall effects, corresponding to two distinct treatment coverages $\alpha_0$ and $\alpha_1$.
+\end{itemize}
+
+### Outcome regression (REG) estimates
+
+```{r reg}
+
+reg_estimates <- reg_estimation(data=dat, 
+                                outcome_formula = outcome_formula, 
+                                alpha = alpha)
+reg_estimates
+
+```
+
+See the section \textbf{Inverse probability-of-treatment weighting (IPW) estimates} for 
+an interpretation of the output. 
+
+### Regression estimation with residual bias correction (DR-BC) estimates
+
+```{r drbc}
+
+drbc_estimates <- drbc_estimation(data=dat, 
+                                  propensity_formula=propensity_formula,
+                                  outcome_formula = outcome_formula, 
+                                  alpha = alpha)
+drbc_estimates
+
+```
+
+See the section \textbf{Inverse probability-of-treatment weighting (IPW) estimates} for 
+an interpretation of the output. 
+
+### Regression estimation with inverse-propensity weighted coefficients (DR-WLS) estimates
+
+```{r drwls}
+
+drwls_estimates <- drwls_estimation(data=dat, 
+                                    propensity_formula=propensity_formula,
+                                    outcome_formula = outcome_formula_drwls, 
+                                    alpha = alpha)
+drwls_estimates
+
+```
+
+See the section \textbf{Inverse probability-of-treatment weighting (IPW) estimates} for 
+an interpretation of the output. 
+
+
